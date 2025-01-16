@@ -1,0 +1,207 @@
+#!/bin/env cftcl
+
+set here		[file dirname [file normalize [info script]]]
+source [file join $here common.tcl]
+
+namespace eval $argv0 {
+	namespace export *
+	namespace ensemble create -prefixes yes
+
+	proc import args { #<<<
+		parse_args $args {
+			files	{-args all}
+		}
+
+		foreach file $files {
+			set bytes	[chantricks readbin $file]
+			set md5b64	[tomcrypt::base64url encode [tomcrypt::hash md5 $bytes]]
+			try {pixel::image_mimetype $bytes} on ok contenttype {} on error {errmsg options} {
+				puts "Could not determine mimetype for \"$file\""
+				continue
+				#set contenttype	application/octet-stream
+			}
+			if {![string match image/* $contenttype]} {
+				puts "Skipping non-image \"$file\": $contenttype"
+				continue
+			}
+			puts "$contenttype: ($file): $md5b64"
+			if {![s3 exists -bucket [bucket] -- $md5b64]} {
+				puts "Importing \"$file\""
+				set cbytes	[encrypt_data $bytes]
+				s3 upload -bucket [bucket] -path $md5b64 -data $cbytes
+			}
+		}
+	}
+
+	#>>>
+	proc show md5b64 { #<<<
+		set bytes	[get -cached -- $md5b64]
+		set h		[file tempfile fn]
+		try {
+			chan configure $h -translation binary
+			puts -nonewline $h $bytes
+			flush $h
+			exec feh -Z --scale-down -F -Y $fn
+		} finally {
+			file delete $fn
+			close $h
+		}
+	}
+
+	#>>>
+	proc embed args { #<<<
+		parse_args $args {
+			-timeout	{-default 20.0}
+			-pretty		{-boolean}
+			md5b64s		{-required -args all}
+		}
+
+		set res	[::embed -timeout $timeout -- {*}$md5b64s]
+
+		if {$pretty} {
+			json pretty $res
+		} else {
+			set res
+		}
+	}
+
+	#>>>
+	proc show_bucket {} { #<<<
+		bucket
+	}
+
+	#>>>
+	proc show_table {} { #<<<
+		table
+	}
+
+	#>>>
+	proc read_embedding md5b64 { #<<<
+		::read_embedding $md5b64
+	}
+
+	#>>>
+	proc reindex {} { #<<<
+		::reindex
+	}
+
+	#>>>
+	proc query args { #<<<
+		parse_args $args {
+			-show	{-boolean}
+			-k		{-default 20}
+			q		{-required}
+		}
+		set content	{[]}
+		set picnum	0
+		set text	{}
+		foreach {- pref pic} [regexp -indices -all -inline {([^|]*)(?:\|([a-zA-Z0-9_-]+))?} $q] {
+			lassign $pref p_s p_e
+			if {$p_s >= 0 && $p_s <= $p_e} {
+				set pref_str	[string range $q $p_s $p_e]
+				append text $pref_str
+			}
+			lassign $pic i_s i_e
+			if {$i_s >= 0 && $i_s <= $i_e} {
+				set thispicnum	[incr $picnum]
+				set md5b64		[string range $q $i_s $i_e]
+
+				set bytes			[get -cached -edge 400 -- $md5b64]
+				set mimetype		[pixel::image_mimetype $bytes]
+				set image_base64	"data:[pixel::image_mimetype $bytes];base64,[binary encode base64 $bytes]"
+				#puts "inline image for $md5b64: [string length $image_base64]"
+				set image_title	"\nImage $thispicnum:\n"
+				json set content end+1 [json template {
+					{
+						"type":		"text",
+						"text":		"~S:image_title"
+					}
+				}]
+				append text	"image $thispicnum"
+				json set content end+1 [json template {
+					{
+						"type":				"image_base64",
+						"image_base64":		"~S:image_base64"
+					}
+				}]
+			}
+		}
+		json set content end+1 [json template {
+			{
+				"type":		"text",
+				"text":		"~S:text"
+			}
+		}]
+
+		set inputs	[json template {
+			[{"content": "~J:content"}]
+		}]
+
+		set req	[json template {
+			{
+				"model":		"voyage-multimodal-3",
+				"input_type":	"query",
+				"inputs":		"~J:inputs"
+			}
+		}]
+
+		set resp		[embed_req -timeout 10.0 -- $req]
+		set q_embedding	[json extract $resp data 0 embedding]
+
+		set md5b64s	{}
+		sqlite3 db /tmp/semfs.sqlite3
+		try {
+			db enable_load_extension 1
+			db eval {select load_extension('./vec0.so')}
+			db eval {
+				select
+					md5b64,
+					distance
+				from
+					embeddings
+				where
+					embedding match :q_embedding
+				order by
+					distance
+				limit
+					:k
+			} {
+				puts "$md5b64: $distance"
+				lappend md5b64s	$md5b64
+			}
+		} finally {
+			rename db {}
+		}
+
+		if {$show && [llength $md5b64s]} {
+			set hold	[pwd]
+			set dir		 [file tempdir]
+			try {
+				cd $dir
+				foreach md5b64 $md5b64s {
+					chantricks writebin [file join $dir $md5b64] [get -cached -- $md5b64]
+					puts "Wrote [file join $dir $md5b64]"
+				}
+				exec feh -Z --scale-down -F -Y -d -D 2.5 -- {*}$md5b64s
+			} finally {
+				cd $hold
+				file delete -force $dir
+			}
+		}
+	}
+
+	#>>>
+}
+
+try {
+	$argv0 {*}$argv
+} on ok res {
+	if {$res ne {}} {
+		puts $res
+	}
+} on error {errmsg options} {
+	puts stderr [dict get $options -errorinfo]
+	exit 1
+}
+
+# vim: ft=tcl foldmethod=marker foldmarker=<<<,>>> ts=4 shiftwidth=4

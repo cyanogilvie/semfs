@@ -1,0 +1,176 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Transform": ["AWS::LanguageExtensions", "AWS::Serverless-2016-10-31"],
+    "Description": "Semantic content cloud filesystem",
+ 
+    "Parameters": {
+        "APIKeySecret": {
+            "Type":     "String",
+            "Default":  "voyageai/test1"
+        }
+    },
+
+    "Metadata": {
+        "AWS::ServerlessRepo::Application": {
+            "Name":             "dynamodb-lambda-processor",
+            "Description":      "DynamoDB processor with container-based Lambda and S3 trigger",
+            "Author":           "Cyan Ogilvie",
+            "SemanticVersion":  "0.0.1",
+            "SpdxLicenseId":    "MIT"
+        }
+    },
+
+    "Globals": {
+        "Function": {
+            "LoggingConfig": {
+                "LogFormat": "JSON"
+            }
+        }
+    },
+
+    "Resources": {
+
+        "Bucket": {
+            "Type": "AWS::S3::Bucket",
+            "Properties": {
+                "BucketName":                   {"Fn::Sub": "${AWS::StackName}-${AWS::AccountId}"},
+                "VersioningConfiguration":      {"Status": "Suspended"},
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls":          true,
+                    "BlockPublicPolicy":        true,
+                    "IgnorePublicAcls":         true,
+                    "RestrictPublicBuckets":    true
+                }
+            }
+        },
+
+        "Table": {
+            "Type": "AWS::DynamoDB::Table",
+            "Properties": {
+                "TableName":    {"Fn::Sub": "${AWS::StackName}-table"},
+                "AttributeDefinitions": [
+                    {   "AttributeName": "pk", "AttributeType": "S" },
+                    {   "AttributeName": "sk", "AttributeType": "S" }
+                ],
+                "KeySchema": [
+                    {   "AttributeName": "pk", "KeyType": "HASH"    },
+                    {   "AttributeName": "sk", "KeyType": "RANGE"   }
+                ],
+                "BillingMode":  "PAY_PER_REQUEST"
+            }
+        },
+
+        "DeadLetterQueue": {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                "MessageRetentionPeriod":   1209600,
+                "VisibilityTimeout":        60
+            }
+        },
+
+        "OnImportFunction": {
+            "Type": "AWS::Serverless::Function",
+            "Properties": {
+                "FunctionName":     {"Fn::Sub": "${AWS::StackName}-on-import"},
+                "Architectures":    ["x86_64"],
+                "ImageConfig": {
+                    "Command":  ["onimport.handler"]
+                },
+                "MemorySize":       1024,
+                "Timeout":          30,
+                "PackageType":      "Image",
+                "Description":      "Generate and store metadata when keys are uploaded to the bucket",
+                "Environment": {
+                    "Variables": {
+                        "BUCKET_NAME":      {"Fn::Sub": "${AWS::StackName}-${AWS::AccountId}"},
+                        "TABLE_NAME":       {"Ref": "Table"},
+                        "S2N_DONT_MLOCK":   "1"
+                    }
+                },
+                "Policies": [
+                    { "S3ReadPolicy":       {"BucketName":  {"Fn::Sub": "${AWS::StackName}-${AWS::AccountId}"}} },
+                    {
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Action": [
+                                    "dynamodb:GetItem",
+                                    "dynamodb:DeleteItem",
+                                    "dynamodb:PutItem",
+                                    "dynamodb:Scan",
+                                    "dynamodb:Query",
+                                    "dynamodb:UpdateItem",
+                                    "dynamodb:BatchWriteItem",
+                                    "dynamodb:BatchGetItem",
+                                    "dynamodb:DescribeTable",
+                                    "dynamodb:ConditionCheckItem",
+                                    "dynamodb:PartiQLInsert",
+                                    "dynamodb:PartiQLUpdate",
+                                    "dynamodb:PartiQLDelete",
+                                    "dynamodb:PartiQLSelect"
+                                ],
+                                "Resource": [
+                                    {"Fn::GetAtt": ["Table", "Arn"]},
+                                    {"Fn::Sub": "${Table.Arn}/index/*"}
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                            {
+                                "Effect": "Allow",
+                                "Action": "secretsmanager:GetSecretValue",
+                                "Resource": [
+                                    {"Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${APIKeySecret}-*"},
+                                    {"Fn::Sub": "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:semfs/key-*"}
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "Events": {
+                    "S3NewObject": {
+                        "Type": "S3",
+                        "Properties": {
+                            "Bucket": {"Ref": "Bucket"},
+                            "Events": [
+                                "s3:ObjectCreated:*",
+                                "s3:ObjectRemoved:*"
+                            ]
+                        }
+                    }
+                },
+                "DeadLetterQueue": {
+                    "Type":         "SQS",
+                    "TargetArn":    {"Fn::GetAtt": ["DeadLetterQueue", "Arn"]}
+                }
+            },
+            "Metadata": {
+                "Dockerfile":       "Dockerfile",
+                "DockerContext":    ".",
+                "DockerTag":        "latest"
+            },
+        }
+    },
+
+    "Outputs": {
+        "Bucket": {
+            "Value":    {"Ref": "Bucket"},
+            "Export":   {"Name": {"Fn::Sub": "${AWS::StackName}-${AWS::AccountId}-bucket"}}
+        },
+        "Table": {
+            "Description":  "DynamoDB table for metadata",
+            "Value":        {"Ref": "Table"}
+        },
+        "DeadLetterQueueUrl": {
+            "Description":  "URL of the dead letter queue",
+            "Value":        {"Ref": "DeadLetterQueue"}
+        },
+        "DeadLetterQueueArn": {
+            "Description":  "ARN of the dead letter queue",
+            "Value":        {"Fn::GetAtt": ["DeadLetterQueue", "Arn"]}
+        }
+    }
+}
