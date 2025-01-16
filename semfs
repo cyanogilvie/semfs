@@ -3,6 +3,26 @@
 set here		[file dirname [file normalize [info script]]]
 source [file join $here common.tcl]
 
+proc show_md5b64s md5b64s { #<<<
+	if {[llength $md5b64s]} {
+		set hold	[pwd]
+		set dir		 [file tempdir]
+		try {
+			cd $dir
+			foreach md5b64 $md5b64s {
+				chantricks writebin [file join $dir $md5b64] [get -cached -- $md5b64]
+				puts "Wrote [file join $dir $md5b64]"
+			}
+			exec feh -Z --scale-down -F -Y -d -D 2.5 -- {*}$md5b64s
+		} finally {
+			cd $hold
+			file delete -force $dir
+		}
+	}
+}
+
+#>>>
+
 namespace eval $argv0 {
 	namespace export *
 	namespace ensemble create -prefixes yes
@@ -34,17 +54,25 @@ namespace eval $argv0 {
 	}
 
 	#>>>
-	proc show md5b64 { #<<<
-		set bytes	[get -cached -- $md5b64]
-		set h		[file tempfile fn]
-		try {
-			chan configure $h -translation binary
-			puts -nonewline $h $bytes
-			flush $h
-			exec feh -Z --scale-down -F -Y $fn
-		} finally {
-			file delete $fn
-			close $h
+	proc show {{md5b64s {}}} { #<<<
+		if {[llength $md5b64s]} {
+			show_md5b64s $md5b64s
+		} else {
+			while {![eof stdin]} {
+				puts "> "
+				set md5b64	[gets stdin]
+				set bytes	[get -cached -- $md5b64]
+				set h		[file tempfile fn]
+				try {
+					chan configure $h -translation binary
+					puts -nonewline $h $bytes
+					flush $h
+					exec feh -Z --scale-down -F -Y $fn
+				} finally {
+					file delete $fn
+					close $h
+				}
+			}
 		}
 	}
 
@@ -173,20 +201,8 @@ namespace eval $argv0 {
 			rename db {}
 		}
 
-		if {$show && [llength $md5b64s]} {
-			set hold	[pwd]
-			set dir		 [file tempdir]
-			try {
-				cd $dir
-				foreach md5b64 $md5b64s {
-					chantricks writebin [file join $dir $md5b64] [get -cached -- $md5b64]
-					puts "Wrote [file join $dir $md5b64]"
-				}
-				exec feh -Z --scale-down -F -Y -d -D 2.5 -- {*}$md5b64s
-			} finally {
-				cd $hold
-				file delete -force $dir
-			}
+		if {$show} {
+			show_md5b64s $md5b64s
 		}
 	}
 
